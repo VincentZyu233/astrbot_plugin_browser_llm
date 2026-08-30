@@ -214,6 +214,7 @@ def test_system_chrome_path_and_sandbox_launch_args(monkeypatch):
     assert kwargs["executable_path"] == "/bin/true"
     assert "--disable-dev-shm-usage" in kwargs["args"]
     assert "--no-sandbox" not in kwargs["args"]
+    assert kwargs["ignore_default_args"] == ["--no-sandbox"]
 
 
 def test_empty_system_browser_path_is_omitted(monkeypatch):
@@ -245,7 +246,7 @@ def test_metadata_and_runtime_versions_match():
     root = Path(__file__).resolve().parent.parent
     metadata = (root / "metadata.yaml").read_text(encoding="utf-8")
     match = re.search(r"^version:\s*(\S+)$", metadata, re.MULTILINE)
-    assert match and match.group(1) == "v1.3.2"
-    assert "PLUGIN_VERSION = \"v1.3.2\"" in (root / "main.py").read_text(
+    assert match and match.group(1) == "v1.3.3"
+    assert "PLUGIN_VERSION = \"v1.3.3\"" in (root / "main.py").read_text(
         encoding="utf-8"
     )

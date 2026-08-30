@@ -174,6 +174,9 @@ class BrowserCore:
             launch_kwargs: dict = {
                 "headless": True,
                 "args": list(_LAUNCH_ARGS),
+                # Playwright 的 Chromium 默认参数包含 --no-sandbox；仅从
+                # args 删除并不能恢复沙箱，必须显式忽略该默认参数。
+                "ignore_default_args": ["--no-sandbox"],
             }
             if self.proxy:
                 launch_kwargs["proxy"] = {"server": self.proxy}

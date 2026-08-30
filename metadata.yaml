@@ -2,7 +2,7 @@ name: astrbot_plugin_browser_llm
 display_name: LLM浏览器
 desc: 安全只读的 Agent 网页浏览插件。支持管理员联网检索、系统 Chrome、来源核实与截图，并保留 SSRF 防护。
 short_desc: 管理员安全只读联网浏览
-version: v1.3.2
+version: v1.3.3
 author: AstrBot Community / VincentZyu233
 repo: "https://github.com/VincentZyu233/astrbot_plugin_browser_llm"
 astrbot_version: ">=4.24.0"

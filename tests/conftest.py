@@ -27,6 +27,9 @@ def _install_astrbot_stub() -> None:
     core_agent = types.ModuleType("astrbot.core.agent")
     core_agent_message = types.ModuleType("astrbot.core.agent.message")
     core_agent_tool = types.ModuleType("astrbot.core.agent.tool")
+    core_star = types.ModuleType("astrbot.core.star")
+    core_star_filter = types.ModuleType("astrbot.core.star.filter")
+    core_star_filter_command = types.ModuleType("astrbot.core.star.filter.command")
     core_provider = types.ModuleType("astrbot.core.provider")
     core_provider_register = types.ModuleType("astrbot.core.provider.register")
     astrbot.api = api
@@ -35,6 +38,8 @@ def _install_astrbot_stub() -> None:
     api.provider = provider
     astrbot.core = core
     core.agent = core_agent
+    core.star = core_star
+    core_star.filter = core_star_filter
     core_agent.message = core_agent_message
     core_agent.tool = core_agent_tool
     core.provider = core_provider
@@ -60,6 +65,12 @@ def _install_astrbot_stub() -> None:
 
         def get_sender_id(self):
             return ""
+
+        def get_message_str(self):
+            return ""
+
+        def is_admin(self):
+            return True
 
         def image_result(self, path):
             return f"image:{path}"
@@ -179,6 +190,30 @@ def _install_astrbot_stub() -> None:
 
             return deco
 
+        @staticmethod
+        def command(*args, **kwargs):
+            def deco(fn):
+                fn._command = (args, kwargs)
+                return fn
+
+            return deco
+
+        @staticmethod
+        def permission_type(*args, **kwargs):
+            def deco(fn):
+                fn._permission_type = (args, kwargs)
+                return fn
+
+            return deco
+
+    class _PermissionType:
+        ADMIN = "admin"
+
+    class GreedyStr(str):
+        pass
+
+    _Filter.PermissionType = _PermissionType
+
     star.Context = Context
     star.Star = Star
     api.AstrBotConfig = AstrBotConfig
@@ -196,6 +231,7 @@ def _install_astrbot_stub() -> None:
     core_agent_tool.FunctionTool = FunctionTool
     core_agent_tool.ToolSet = ToolSet
     core_provider_register.llm_tools = _FuncCall()
+    core_star_filter_command.GreedyStr = GreedyStr
 
     # 注册到 sys.modules：让 main.py 的 from astrbot.xxx import ... 可用。
     sys.modules["astrbot"] = astrbot
@@ -207,6 +243,9 @@ def _install_astrbot_stub() -> None:
     sys.modules["astrbot.core.agent"] = core_agent
     sys.modules["astrbot.core.agent.message"] = core_agent_message
     sys.modules["astrbot.core.agent.tool"] = core_agent_tool
+    sys.modules["astrbot.core.star"] = core_star
+    sys.modules["astrbot.core.star.filter"] = core_star_filter
+    sys.modules["astrbot.core.star.filter.command"] = core_star_filter_command
     sys.modules["astrbot.core.provider"] = core_provider
     sys.modules["astrbot.core.provider.register"] = core_provider_register
 

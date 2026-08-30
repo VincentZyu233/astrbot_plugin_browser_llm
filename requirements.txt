@@ -1,6 +1,6 @@
-# playwright 已由 AstrBot 环境提供，无需在此安装。
-# 本插件通过 astrbot 运行时的 Playwright 驱动浏览器，
-# 直接 pip install playwright 会导致与 AstrBot 自带版本冲突。
+# 仅安装 Python 驱动；部署时通过 browser_executable_path 复用系统 Chrome，
+# 无需执行 `playwright install chromium` 下载额外浏览器。
+playwright==1.62.0
 
 # 测试依赖（仅运行 tests/ 套件时需要，非插件运行依赖）：
 # - pytest：测试运行器

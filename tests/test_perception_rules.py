@@ -53,6 +53,9 @@ class _Event:
     def get_sender_id(self):
         return "456"
 
+    def is_admin(self):
+        return True
+
 
 def _capture_logger(monkeypatch, level="warning"):
     """把 main.logger 指定级别替换为记录函数，返回记录列表。"""

@@ -27,6 +27,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
+from astrbot.core.star.filter.command import GreedyStr
 
 from .core.browser import BrowserCore, validate_browser_type
 from .core.extract import ContentExtractor
@@ -41,7 +42,7 @@ METADATA_NAME = "astrbot_plugin_browser_llm"
 
 # 插件版本，与 metadata.yaml 的 version 保持一致（发布版本变更时两处同步修改；
 # 真实运行时 Star 实例无 self.metadata 属性，无法动态读取，故集中为单一常量）。
-PLUGIN_VERSION = "v1.3.1"
+PLUGIN_VERSION = "v1.3.2"
 
 # terminate 资源清理总超时（秒）：超过则放弃等待并强制收尾，防止插件重载
 # 被悬挂的 close 阻塞（曾实测 browser.close 悬挂数小时，旧实例 chromium 进程
@@ -80,6 +81,21 @@ _PERCEPTION_MODES = ("text", "text_image", "image")
 # 不敏感），后跟空格或换行再接任务描述。命中后本次任务覆盖全局配置。
 _PERCEPTION_PREFIX_RE = re.compile(
     r"^perception\s*=\s*(text|text_image|image)(?=\s|$)", re.IGNORECASE
+)
+
+# 明确要求联网/浏览器检索时，向主模型注入强制浏览指令。/browse 命令是
+# 完全确定性的入口；自然语言路由仍由主模型执行 tool call。
+_EXPLICIT_WEB_INTENT_PATTERNS = (
+    re.compile(r"(?:联网|上网|互联网|网页).{0,8}(?:搜|查|检索|搜索)"),
+    re.compile(r"(?:搜|查|检索|搜索).{0,8}(?:联网|互联网|网页)"),
+    re.compile(r"(?:搜|查|检索|搜索).{0,12}(?:最新|实时|今天|刚刚|近期|当前)"),
+    re.compile(r"(?:用|打开).{0,6}浏览器.{0,8}(?:搜|查|看|打开)"),
+    re.compile(r"(?:打开|访问|查看).{0,20}(?:https?://|www\.)", re.IGNORECASE),
+    re.compile(
+        r"\b(?:search|look up|browse)\b.{0,24}"
+        r"\b(?:web|online|latest|current)\b",
+        re.IGNORECASE,
+    ),
 )
 # 非法前缀识别：`perception=xxx` 但值不在可选集（或格式错误）时，整段
 # 剔除并记录警告，回落「规则 > 全局」默认链路，不把前缀当任务内容。
@@ -348,6 +364,19 @@ def _params(
 
 # 24 个浏览工具配置：name / description（展示给子 Agent LLM）/
 # parameters（JSON Schema）/ method（插件实例方法名）。
+_READ_ONLY_BLOCKED_TOOLS = frozenset(
+    {
+        "browse_input",
+        "browse_press_key",
+        "browse_click_text",
+        "browse_set_slider",
+        "browse_select_option",
+        "browse_click_coords",
+        "browse_checkbox",
+        "browse_sniff_media",
+    }
+)
+
 _BROWSER_TOOLS = [
     {
         "name": "browse_search",
@@ -565,6 +594,9 @@ def _make_browser_tool(plugin: "BrowserLLMPlugin", spec: dict):
     async def _handler(event, **kwargs):
         # 工具入口轻量热更新配置（重读共享 config dict）。
         plugin._refresh_config()
+        allowed, deny_reason = plugin._is_browser_allowed(event)
+        if not allowed:
+            return f"【拒绝】{deny_reason}"
         return await method(event, **kwargs)
 
     return FunctionTool(
@@ -633,6 +665,21 @@ _BROWSER_AGENT_INSTRUCTION = (
     "- 拿到结果后，原样返回结果页文字（包含 Human Model ID 等关键信息）。"
 )
 
+_READ_ONLY_BROWSER_AGENT_INSTRUCTION = (
+    "你是只读网页浏览器子代理（browser_agent），负责检索和阅读公开网页。"
+    "你只能搜索、打开公开 URL、按已提取链接导航、滚动、前后翻页、管理标签页、"
+    "读取正文与链接、悬停、刷新、截图和局部放大。禁止登录、输入信息、提交表单、"
+    "点击操作按钮、修改页面状态、下载文件或尝试处理验证码。\n\n"
+    "检索原则：\n"
+    "1. 使用 browse_search 搜索，再用 browse_get_links 和 browse_click_link 进入来源；\n"
+    "2. 开放式问题尽量阅读 2-3 个独立公开来源；精确事实可只采用一个权威来源；\n"
+    "3. 优先读取正文，只有用户要求截图或文字不足时才截图；\n"
+    "4. 返回每个关键来源的页面标题、URL、关键内容和可获得的发布日期；\n"
+    "5. 不得把模型记忆、搜索摘要或未打开的网页描述成已经核实的来源；\n"
+    "6. 遇到验证码、登录墙、拒绝访问或信息不足时立即停止并如实说明；\n"
+    "7. 完成后用简洁中文总结，不暴露内部工具调用过程。"
+)
+
 
 class BrowserLLMPlugin(Star):
     """LLM 浏览器插件主入口。
@@ -648,7 +695,7 @@ class BrowserLLMPlugin(Star):
         Args:
             context: AstrBot 插件上下文，提供事件注册与消息发送能力。
             config: 插件配置对象，对应 _conf_schema.json 中定义的
-                24 个配置项（含默认值）；未传入时使用空字典兜底。
+                配置项（含默认值）；未传入时使用空字典兜底。
         """
         super().__init__(context)
         self.config = config or {}
@@ -691,7 +738,7 @@ class BrowserLLMPlugin(Star):
     def _load_config(self) -> None:
         """将 _conf_schema.json 中的配置项读取为实例属性。
 
-        全部 24 个配置项：浏览器引擎 / 默认页 / 搜索引擎 / 禁词 /
+        配置项包括：浏览器引擎 / 系统浏览器路径 / 默认页 / 搜索引擎 / 禁词 /
         内网拦截 / 提取与链接上限 / 超时 / 页数上限 / 空闲回收 /
         会话黑白名单 / 截图与识图 / 代理 / 视口 / 子代理控制。
 
@@ -705,6 +752,9 @@ class BrowserLLMPlugin(Star):
 
         # 浏览器基础
         self.browser_type: str = str(cfg.get("browser_type", "chromium"))
+        self.browser_executable_path: str = str(
+            cfg.get("browser_executable_path", "") or ""
+        ).strip()
         self.default_url: str = str(cfg.get("default_url", "https://www.baidu.com"))
         self.default_search_engine: str = str(cfg.get("default_search_engine", "必应搜索"))
 
@@ -714,6 +764,10 @@ class BrowserLLMPlugin(Star):
             ["pornhub", "色情", "成人", "赌博", "暴力", "政治", "反动", "恐怖", "谣言", "诈骗", "病毒"],
         )
         self.block_internal_ip: bool = self._as_bool(cfg.get("block_internal_ip", True), True)
+        self.read_only_mode: bool = self._as_bool(cfg.get("read_only_mode", True), True)
+        self.enable_local_page_preview: bool = self._as_bool(
+            cfg.get("enable_local_page_preview", False), False
+        )
 
         # 提取与资源控制
         self.max_chars: float = self._as_float(cfg.get("max_chars", 4000), 4000)
@@ -817,7 +871,14 @@ class BrowserLLMPlugin(Star):
         此处同步 BrowserCore.block_internal_ip 仅影响之后新建的 context；
         关闭开关不会摘除已装拦截（保持安全方向）。
         """
+        previous_read_only = getattr(self, "read_only_mode", None)
         self._load_config()
+        if (
+            previous_read_only is not None
+            and previous_read_only != self.read_only_mode
+            and hasattr(self, "_browser_tools")
+        ):
+            self._configure_browser_tools()
         # max_pages / idle_timeout / default_url 固化在 SessionManager，
         # 同步热更新：新额度/新阈值对新标签与下一轮回收立即生效。
         if self.sessions is not None:
@@ -871,9 +932,8 @@ class BrowserLLMPlugin(Star):
         self._start_cache_cleanup_task()
         # 后台空闲回收任务（每 60s 关闭超时未活动的会话）。
         await self.sessions.start_sweeper()
-        # 构建 24 个浏览工具（FunctionTool）与子 Agent 工具集。
-        self._browser_tools = [_make_browser_tool(self, s) for s in _BROWSER_TOOLS]
-        self._browser_toolset = self._build_toolset(self._browser_tools)
+        # 构建浏览工具与子 Agent 工具集；只读模式在工具集合层移除写操作。
+        self._configure_browser_tools()
         # 按页面感知方式动态生成子代理指令（基础模板 + 感知方式段）。
         self._browser_instruction = self._build_subagent_instruction()
         # 识图 provider 下拉同步：把 AstrBot 已加载 provider 写进内存 schema
@@ -883,11 +943,17 @@ class BrowserLLMPlugin(Star):
         self._vision_sync_task: Optional[asyncio.Task] = None
         self._sync_vision_provider_options()
         self._start_vision_provider_sync_task()
-        logger.info(f"[{self.metadata_name}] 浏览器子代理工具集: "
-                    f"{len(self._browser_tools)} 个浏览工具")
+        logger.info(
+            f"[{self.metadata_name}] 浏览器子代理工具集: "
+            f"{len(self._browser_tools)} 个浏览工具（只读={self.read_only_mode}）"
+        )
         logger.info(f"[{self.metadata_name}] 页面感知方式: {self.page_perception}")
         logger.info(f"[{self.metadata_name}] 插件 {PLUGIN_VERSION} 已激活")
         logger.info(f"[{self.metadata_name}] 浏览器引擎: {self.browser_type}")
+        logger.info(
+            f"[{self.metadata_name}] 浏览器路径: "
+            f"{self.browser_executable_path or '(Playwright 默认)'}"
+        )
         logger.info(f"[{self.metadata_name}] 默认搜索引擎: {self.default_search_engine}")
 
     @staticmethod
@@ -896,6 +962,16 @@ class BrowserLLMPlugin(Star):
         from astrbot.core.agent.tool import ToolSet  # noqa: PLC0415 — 延迟导入
 
         return ToolSet(tools=tools)
+
+    def _configure_browser_tools(self) -> None:
+        """按安全模式重建子代理工具集。"""
+        specs = [
+            spec
+            for spec in _BROWSER_TOOLS
+            if not self.read_only_mode or spec["name"] not in _READ_ONLY_BLOCKED_TOOLS
+        ]
+        self._browser_tools = [_make_browser_tool(self, spec) for spec in specs]
+        self._browser_toolset = self._build_toolset(self._browser_tools)
 
     def _build_subagent_instruction(self, perception: str | None = None) -> str:
         """动态生成浏览器子代理指令（基础模板 + 页面感知方式段）。
@@ -933,7 +1009,12 @@ class BrowserLLMPlugin(Star):
             # 非法/空显式值：回退全局 page_perception（再回退 text_image）。
             mode = (self.page_perception or "").strip().lower()
         perception_note = perception_map.get(mode, perception_map["text_image"])
-        return f"{_BROWSER_AGENT_INSTRUCTION}\n\n{perception_note}"
+        base_instruction = (
+            _READ_ONLY_BROWSER_AGENT_INSTRUCTION
+            if self.read_only_mode
+            else _BROWSER_AGENT_INSTRUCTION
+        )
+        return f"{base_instruction}\n\n{perception_note}"
 
     def _cleanup_cache(self) -> int:
         """清理超过 cache_days 天的媒体/截图缓存文件，返回删除数。
@@ -1244,12 +1325,28 @@ class BrowserLLMPlugin(Star):
     # 浏览器子代理入口（工具化子代理：browse_web）
     # ================================================================
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("browse")
+    async def browse_command(
+        self, event: AstrMessageEvent, task: GreedyStr | None = None
+    ):
+        """使用只读浏览器联网检索：/browse <任务>"""
+        task_text = str(task or "").strip()
+        if not task_text:
+            yield event.plain_result(
+                "用法：/browse <联网检索任务>\n"
+                "示例：/browse 搜索 AstrBot 最新版本并附上来源"
+            )
+            return
+        result = await self.browse_web(event, input=task_text)
+        yield event.plain_result(result)
+
     @filter.llm_tool(name="browse_web")
     async def browse_web(self, event: AstrMessageEvent, input: str = "") -> str:
-        """委托浏览器子代理完成网页浏览任务（打开网页、页面交互、提取内容或截图）。
+        """委托只读浏览器子代理完成联网检索、网页阅读、滚动或截图任务。
 
         Args:
-            input(string): 给浏览器子代理的任务描述，说明要打开什么网址、查找什么内容、是否需要点击/滚动/填表等交互。可选：input 开头可加感知模式前缀 `perception=text|text_image|image`（大小写不敏感，后跟空格或换行再接任务描述），本次任务按此前缀覆盖全局/规则配置。
+            input(string): 给浏览器子代理的任务描述，说明要搜索或打开什么、查找什么内容、是否需要滚动或截图。可选：input 开头可加感知模式前缀 `perception=text|text_image|image`（大小写不敏感，后跟空格或换行再接任务描述），本次任务按此前缀覆盖全局/规则配置。
 
         感知模式优先级（v1.3.0）：input 前缀显式指定 > perception_rules
         会话规则命中（UMO 子串匹配）> page_perception 全局配置；解析结果
@@ -1267,7 +1364,7 @@ class BrowserLLMPlugin(Star):
             # 顺带同步识图 provider 下拉（面板每次请求实时读取内存 schema，
             # 此入口被主 LLM 高频调用，可保持面板选项跟随运行时 provider 变化）。
             self._sync_vision_provider_options()
-            allowed, deny_reason = self._is_session_allowed(event)
+            allowed, deny_reason = self._is_browser_allowed(event)
             if not allowed:
                 return f"【拒绝】{deny_reason}"
             # 感知模式精细化（v1.3.0）：解析 input 前缀（显式参数）并按下述
@@ -1359,9 +1456,11 @@ class BrowserLLMPlugin(Star):
             # 轻量热更新配置：黑名单/截图/内网拦截等修改无需重启即生效。
             self._refresh_config()
             # 会话权限：与既有浏览工具一致，过白/黑名单（默认配置为空即放行）。
-            allowed, deny_reason = self._is_session_allowed(event)
+            allowed, deny_reason = self._is_browser_allowed(event)
             if not allowed:
                 return f"【拒绝】{deny_reason}"
+            if not self.enable_local_page_preview:
+                return "【拒绝】本地页面预览已被管理员关闭"
 
             # 0. 感知模式解析（v1.3.0 补强）：显式 perception 参数 > 全局
             # page_perception；非法显式值记录警告并回落全局。子代理无独立
@@ -1698,6 +1797,20 @@ class BrowserLLMPlugin(Star):
             mode = (self.page_perception or "").strip().lower()
             return mode if mode in _PERCEPTION_MODES else "text_image"
         return raw
+
+    @staticmethod
+    def _event_is_admin(event: AstrMessageEvent) -> bool:
+        """安全读取 AstrBot 管理员角色；异常或缺失时按非管理员处理。"""
+        try:
+            return bool(event.is_admin())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _is_browser_allowed(self, event: AstrMessageEvent) -> tuple[bool, str]:
+        """统一浏览权限：强制管理员，再应用会话黑白名单。"""
+        if not self._event_is_admin(event):
+            return False, "网页浏览功能仅限 AstrBot 管理员使用"
+        return self._is_session_allowed(event)
 
     def _is_session_allowed(self, event: AstrMessageEvent) -> tuple[bool, str]:
         """会话白/黑名单检查（参考 AtTool 实现）。
@@ -2836,7 +2949,7 @@ class BrowserLLMPlugin(Star):
         self, event: AstrMessageEvent, req: ProviderRequest
     ):
         """在 LLM 请求前注入网页浏览工具使用指引。"""
-        allowed, deny_reason = self._is_session_allowed(event)
+        allowed, deny_reason = self._is_browser_allowed(event)
         if not allowed:
             req.system_prompt = (req.system_prompt or "") + (
                 f"\n\n【注意】{deny_reason}，本会话不允许使用网页浏览功能。"
@@ -2846,29 +2959,50 @@ class BrowserLLMPlugin(Star):
             return
 
         instruction = self._build_browser_instruction()
+        message = ""
+        try:
+            message = event.get_message_str() or ""
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[{self.metadata_name}] 读取消息文本失败，跳过强制路由: {e}")
+        if self._has_explicit_web_intent(message):
+            instruction += (
+                "\n\n【本轮强制联网】用户已明确要求联网、浏览器检索或查询"
+                "最新网页资料。本轮必须调用 browse_web，阅读实际公开网页后再回答；"
+                "不得仅依赖模型记忆。"
+            )
         req.system_prompt = (req.system_prompt or "") + instruction
+
+    @staticmethod
+    def _has_explicit_web_intent(message: str) -> bool:
+        """识别明确的联网/浏览器检索意图，避免普通常识问题启动浏览器。"""
+        text = str(message or "").strip()
+        return bool(text) and any(p.search(text) for p in _EXPLICIT_WEB_INTENT_PATTERNS)
 
     def _build_browser_instruction(self) -> str:
         """构建浏览委托指引（注入给主 LLM 的文本）。
 
-        定位：浏览器子代理（browser_agent）是重操作，主 LLM 仅在需要
-        真实网页交互时调用 browse_web 委托；纯搜索/问答不要调用。
+        定位：浏览器子代理（browser_agent）用于明确联网检索、核实最新资料
+        与真实网页阅读；稳定常识问答无需调用。
         """
+        safety_boundary = (
+            "浏览器运行在只读模式：不得登录、填表、提交、修改网站状态、"
+            "下载文件或尝试通过验证码。\n\n"
+            if self.read_only_mode
+            else (
+                "浏览器允许网页交互，但不得绕过验证码或执行未经用户确认的"
+                "敏感操作。\n\n"
+            )
+        )
         return (
             "\n\n## 网页浏览委托指引（浏览器子代理）\n"
             "你可以用 browse_web 工具把网页浏览任务委托给浏览器子代理"
             "（参数 input 为给子代理的任务描述）。\n\n"
-            "【不要用】纯信息查询 / 搜索问答（如『今天天气』『xx是什么』"
-            "『搜一下 xxx 新闻』）应优先使用其他搜索 / 联网工具或直接回答，"
-            "不要调用 browse_web。浏览器是重操作（打开真实"
-            "页面、耗时数秒、占用资源），仅为纯搜索启动是浪费。\n\n"
-            "【要用】以下场景才调用 browse_web：\n"
-            "① 用户明确要求打开 / 查看某个具体网址或网页内容；\n"
-            "② 需要在页面上交互：点击链接 / 按钮、滚动加载、翻页、填表、"
-            "按键、标签页切换；\n"
-            "③ 搜索结果摘要不足以回答，需要进入具体网页阅读详情；\n"
-            "④ 需要向用户展示页面外观（截图）；\n"
-            "⑤ 页面是动态渲染、其他工具抓不到正文。\n\n"
+            "【要用】用户明确要求『联网搜索/上网查/用浏览器查』、查询最新或"
+            "实时网页资料、查看具体网址、阅读动态页面、滚动加载或截图时，"
+            "调用 browse_web 并以实际访问结果作答。\n\n"
+            "【不要用】不要求时效或来源的稳定常识问答无需启动浏览器，直接"
+            "回答即可。浏览器是重操作，会耗时数秒并占用额外内存。\n\n"
+            f"{safety_boundary}"
             "委托时给子代理清晰的任务描述（要打开什么、查找什么、"
             "是否要交互），子代理会自主调用 browse_* 工具完成浏览并"
             "返回结果；你消化结果后再回复用户，不要暴露工具调用过程细节。"

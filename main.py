@@ -42,7 +42,7 @@ METADATA_NAME = "astrbot_plugin_browser_llm"
 
 # 插件版本，与 metadata.yaml 的 version 保持一致（发布版本变更时两处同步修改；
 # 真实运行时 Star 实例无 self.metadata 属性，无法动态读取，故集中为单一常量）。
-PLUGIN_VERSION = "v1.3.2"
+PLUGIN_VERSION = "v1.3.3"
 
 # terminate 资源清理总超时（秒）：超过则放弃等待并强制收尾，防止插件重载
 # 被悬挂的 close 阻塞（曾实测 browser.close 悬挂数小时，旧实例 chromium 进程

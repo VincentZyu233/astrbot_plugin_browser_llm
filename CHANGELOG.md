@@ -4,11 +4,19 @@
 `data/` 目录（主仓库 .gitignore 忽略）迁移初始化而来。仅跟踪插件源码与测试，运行时
 数据（`data/`：截图、运行时配置、临时文件）一律不入库。
 
+## [v1.3.3] - 2026-08-31
+
+### Chrome 沙箱热修
+
+- 显式忽略 Playwright 自动添加的 `--no-sandbox` 默认参数；仅从自定义 args
+  移除该参数不足以恢复沙箱。
+- 增加启动参数回归断言，并在真实系统 Chrome 进程命令行中验证沙箱参数未被禁用。
+
 ## [v1.3.2] - 2026-08-31
 
 ### 安全只读浏览与可靠联网触发
 
-- 支持通过 `browser_executable_path` 复用系统 Chrome，移除 `--no-sandbox`，保留浏览器沙箱。
+- 支持通过 `browser_executable_path` 复用系统 Chrome，并移除插件硬编码的 `--no-sandbox`。
 - 强制 AstrBot 管理员权限；WebUI 工具权限和会话黑白名单继续作为纵深防御。
 - 新增默认开启的 `read_only_mode`，从子代理工具集中移除网站写操作与媒体下载。
 - 新增默认关闭的 `enable_local_page_preview`，纯公网检索不暴露本地页面预览。

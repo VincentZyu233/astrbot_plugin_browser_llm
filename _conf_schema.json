@@ -10,6 +10,12 @@
     ],
     "default": "chromium"
   },
+  "browser_executable_path": {
+    "type": "string",
+    "description": "系统 Chromium/Chrome 路径",
+    "hint": "可选的系统浏览器可执行文件绝对路径，如 /usr/bin/google-chrome。仅支持 chromium；留空使用 Playwright 默认浏览器。",
+    "default": ""
+  },
   "default_url": {
     "type": "string",
     "description": "默认起始页",
@@ -51,6 +57,18 @@
     "description": "拦截内网地址",
     "hint": "开启后拒绝访问内网/本机地址（如 127.0.0.1、192.168.x.x），防止 SSRF 风险。关闭后不拦截内网地址（不推荐）。",
     "default": true
+  },
+  "read_only_mode": {
+    "type": "bool",
+    "description": "只读浏览模式",
+    "hint": "开启后从子代理工具集中移除输入、提交、操作按钮、表单控件、坐标点击和媒体下载能力。推荐保持开启。",
+    "default": true
+  },
+  "enable_local_page_preview": {
+    "type": "bool",
+    "description": "允许本地 HTML 预览",
+    "hint": "允许管理员渲染 AstrBot 白名单目录中的本地 HTML。纯公网检索场景建议关闭。",
+    "default": false
   },
   "max_chars": {
     "type": "int",

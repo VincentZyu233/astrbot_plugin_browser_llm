@@ -45,6 +45,12 @@ class FakeEvent:
     def get_sender_id(self):
         return "456"
 
+    def get_message_str(self):
+        return ""
+
+    def is_admin(self):
+        return True
+
     def image_result(self, path):
         return f"image:{path}"
 

@@ -1,11 +1,14 @@
 # astrbot_plugin_browser_llm
 
-Agent 驱动的网页浏览插件 —— 让 LLM 通过 function-calling 自主浏览网页：导航、搜索、点击链接、填表、滚动、截图识图、下载媒体，无需用户手动指令。
+Agent 驱动的安全只读网页浏览插件。管理员可以让 LLM 使用真实浏览器联网搜索、阅读网页、滚动、截图并核实来源；默认不允许登录、填表、提交或下载。
 
 ## ✨ 功能特性
 
-- **工具化子代理架构**：主 LLM 只看到一个 `browse_web` 入口工具，24 个 `browse_*` 工具在子代理上下文中运行，显著减少主 LLM 的 token 占用
-- **完整网页交互**：打开网页、提取正文/链接、按文本/坐标点击、填表、按键、滚动、滑块、下拉框、复选框、标签页管理
+- **工具化子代理架构**：主 LLM 只看到 `browse_web`，默认只读子代理获得 16 个浏览工具，降低主模型 token 占用
+- **可靠触发**：明确说“联网搜索/上网查/查询最新资料”时要求主模型调用浏览器；`/browse <任务>` 可直接强制执行
+- **安全只读默认值**：工具集层移除输入、提交、按钮/坐标点击、表单控件操作和媒体下载，不只依赖提示词
+- **管理员双门禁**：插件强制 `event.is_admin()`，同时支持 AstrBot WebUI 工具权限与会话黑白名单
+- **系统 Chrome**：可通过 `browser_executable_path` 复用已安装的 Chrome，并保留 Chrome 沙箱
 - **识图辅助**：接入多模态模型（如 opencode-go/mimo-v2.5）对截图做视觉理解，支持区域裁剪放大识图（`browse_zoom_crop`）
 - **媒体嗅探**：从页面嗅探图片/视频资源，下载并发送到群聊（`browse_sniff_media`）
 - **本地页面自检**：`browse_local_page` 渲染查看本地 HTML 供子代理/开发者自检页面（无头渲染 + 截图 + 视觉描述，视觉不可用时降级文本提取；路径白名单为工作区（AstrBot 工作区 + 平台工作区，如 `/root/workspace`）+ 插件 data 目录，可用环境变量 `BROWSER_LLM_EXTRA_LOCAL_ROOTS`（冒号分隔）追加额外根目录；支持 `perception` 参数按任务控制感知方式——全文本子代理读文档/报错页可传 `perception="text"` 跳过截图识图）
@@ -14,14 +17,14 @@ Agent 驱动的网页浏览插件 —— 让 LLM 通过 function-calling 自主�
 - **识图缓存**：同一 URL（去 fragment/尾斜杠规范化）在 `vision_cache_ttl` 内重复识图直接复用结果（带 `[缓存]` 前缀），省识图耗时与 token
 - **配置热更新**：会话黑白名单、内容禁词、内网拦截开关、截图开关、识图 Provider、感知规则等修改后无需重启，下次工具调用即生效（Dashboard 保存即同步）
 - **资源清理加固**：浏览器关闭/插件重载带超时保护与总超时兜底，避免 WebUI 重载后旧实例 chromium 残留进程
-- **安全防护**：SSRF 内网拦截、内容禁词过滤、图形验证码自动停止、下载大小上限
+- **安全防护**：SSRF 内网/云元数据拦截、内容过滤、图形验证码自动停止和会话资源上限
 
 ## 🏗️ 架构
 
 ```
 主 LLM（main agent）
   ├── browse_web（网页浏览入口 llm_tool）
-  │     └── 子代理 tool_loop_agent（24 个 browse_* 工具）
+  │     └── 子代理 tool_loop_agent（默认 16 个只读 browse_* 工具）
   │           ├── Playwright 浏览器（chromium）
   │           ├── SessionManager（会话/标签页隔离）
   │           ├── SafetyFilter（SSRF/禁词）
@@ -36,13 +39,18 @@ Agent 驱动的网页浏览插件 —— 让 LLM 通过 function-calling 自主�
 
 将插件目录放入 `AstrBot/data/plugins/`，重启 AstrBot 或在 WebUI 重载插件。
 
-依赖：Playwright + chromium（AstrBot 环境已提供，无需额外安装）。
+依赖：Python Playwright 1.62.0。推荐安装系统 Chrome 后设置绝对路径；不需要执行
+`playwright install chromium`。已验证 AstrBot v4.27.3、Google Chrome 152、
+Discord 与 QQ 官方适配器。
 
 ## ⚙️ 配置项（WebUI 插件配置）
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
 | `browser_type` | chromium | 浏览器内核（chromium/firefox/webkit，`chrome` 自动映射为 chromium；非法值启动前给出可选值提示） |
+| `browser_executable_path` | - | 系统 Chrome/Chromium 的绝对路径；非空时仅支持 chromium |
+| `read_only_mode` | true | 移除可能修改网站状态或下载内容的工具 |
+| `enable_local_page_preview` | false | 是否允许管理员渲染白名单目录中的本地 HTML |
 | `default_url` | https://www.baidu.com | 新会话首个标签的初始页 |
 | `default_search_engine` | 必应搜索 | 默认搜索引擎（必应搜索/百度搜索/谷歌搜索/B站搜索） |
 | `max_chars` | 4000 | 正文摘要最大字符数（<=0 用默认值） |
@@ -50,7 +58,7 @@ Agent 驱动的网页浏览插件 —— 让 LLM 通过 function-calling 自主�
 | `timeout` | 30 | 页面加载超时（秒） |
 | `max_pages` | 5 | 全部会话的标签页总数上限 |
 | `idle_timeout` | 1800 | 会话空闲回收阈值（秒） |
-| `session_whitelist` | [] | 允许使用浏览器的会话白名单（空=全部允许） |
+| `session_whitelist` | [] | 管理员会话白名单（空=允许所有 AstrBot 管理员） |
 | `session_blacklist` | [] | 禁止使用浏览器的会话黑名单 |
 | `enable_screenshot` | true | 是否允许截图 |
 | `silent_mode` | true | 静默模式：截图仅内部识图不发群 |
@@ -98,28 +106,31 @@ text_image）。全文本子代理（前端/测试/工程等）读取本地 HTML
 
 ## 🚀 使用示例
 
-群聊中直接说：
+自然语言明确要求联网时，主模型会优先委托浏览器；工具选择仍由 LLM 完成。需要确定性执行时使用 `/browse`：
 
-- 「打开 https://example.com 看看是什么」
-- 「在这个页面上帮我填表提交」
-- 「把这个页面上的图片都下载发我」
-- 「打开这个网址，把页面上所有的商品价格读出来」
+- 「联网搜索 AstrBot 最新版本，并给出来源」
+- 「打开 https://example.com 读取正文」
+- `/browse 搜索 Playwright 最新版本，交叉核实两个来源`
+- `/browse perception=text_image 打开这个网址并截图说明页面结构`
+
+普通成员不能调用浏览器。只读模式不会登录、填写或提交表单、点击操作按钮、下载文件或尝试通过验证码。
 
 ## 🧪 开发与测试
 
 ```bash
 cd astrbot_plugin_browser_llm
-python -m pytest tests/ -q    # 全量测试（370 passed）
+python -m pytest tests/ -q    # 全量测试（388 passed，2 个可选浏览器集成测试跳过）
 ```
 
 测试覆盖：工具契约（docstring 与注册一致性）、感知模式前缀解析/规则匹配/优先级、
 识图缓存（TTL/URL 规范化/会话隔离/拒识不写缓存）、本地页面工具（感知参数/路径白名单/
 降级文本）、SSRF 与安全过滤、配置热更新、浏览器资源清理（shutdown 超时与 terminate
-顺序）。发布流程：commit → push main → 打 tag（如 `v1.3.0`）→ release.yml 自动
+顺序）、管理员权限、只读工具过滤、联网触发、系统 Chrome 路径。发布流程：commit → push main → 打 tag（如 `v1.3.2`）→ release.yml 自动
 打包发布（zip 已排除 `dist/`、`.github/`、`data/`、`__pycache__`）。
 
 ## 🤝 致谢
 
+- 上游项目：[cmdst/astrbot_plugin_browser_llm](https://github.com/cmdst/astrbot_plugin_browser_llm)
 - 灵感与部分交互模式参考 [astrbot_plugin_browser](https://github.com/Zhalslar/astrbot_plugin_browser)（Playwright 浏览器操作思路）
 - llm_tool / 会话过滤模式参考 AstrBot 生态插件与 [AstrBot 官方文档](https://astrbot.app/)
 - 多模态识图链路基于 AstrBot 的多模态 Provider 能力

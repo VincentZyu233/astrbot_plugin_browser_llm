@@ -30,6 +30,7 @@ def _make_plugin(**overrides):
         "session_blacklist": [],
         "enable_screenshot": True,
         "silent_mode": True,
+        "enable_local_page_preview": True,
     }
     cfg.update(overrides)
     return BrowserLLMPlugin(context=Context(), config=cfg)
@@ -112,7 +113,7 @@ def test_browse_web_entry_refreshes_config():
     calls = []
     plugin._refresh_config = lambda: calls.append(1)
     plugin._sync_vision_provider_options = lambda: None
-    plugin._is_session_allowed = lambda e: (False, "deny")
+    plugin._is_browser_allowed = lambda e: (False, "deny")
     result = _run(plugin.browse_web(object(), input="x"))
     assert result == "【拒绝】deny"
     assert calls == [1], "browse_web 入口应调用 _refresh_config"
@@ -146,7 +147,7 @@ def test_tool_handler_refreshes_config_before_call():
         "method": "browse_open",
     }
     tool = _make_browser_tool(plugin, spec)
-    ctx = SimpleNamespace(context=SimpleNamespace(event=None))
+    ctx = SimpleNamespace(context=SimpleNamespace(event=AstrMessageEvent()))
     result = _run(tool.call(context=ctx))
     assert result == "ok"
     assert calls == [1], "工具调用前应先热更新配置"

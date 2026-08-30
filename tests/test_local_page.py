@@ -43,6 +43,12 @@ class FakeEvent:
     def get_sender_id(self):
         return "456"
 
+    def get_message_str(self):
+        return ""
+
+    def is_admin(self):
+        return True
+
     def image_result(self, path):
         return f"image:{path}"
 
@@ -116,6 +122,7 @@ def _make_plugin(tmp_path, page=None, screenshot_ok=True, session_blacklist=None
         "browser_type": "chromium",
         "banned_words": BANNED,
         "block_internal_ip": True,
+        "enable_local_page_preview": True,
         "max_chars": 4000,
         "timeout": 30,
         "session_whitelist": session_whitelist or [],

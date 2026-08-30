@@ -29,6 +29,12 @@ class FakeEvent:
     def get_sender_id(self):
         return "456"
 
+    def get_message_str(self):
+        return ""
+
+    def is_admin(self):
+        return True
+
     # browse_sniff_media 成功分支需要的方法（参考 conftest AstrMessageEvent 桩）。
     def image_result(self, path):
         return f"image:{path}"

@@ -24,9 +24,9 @@ from .safety import acheck_hostname_internal
 
 logger = logging.getLogger(__name__)
 
-# 浏览器启动默认参数：容器环境普遍需要 --no-sandbox 与
-# --disable-dev-shm-usage（/dev/shm 过小导致渲染进程崩溃）。
-_LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
+# 远程主机的 /dev/shm 可能较小，因此保留此稳定性参数。不要禁用 Chrome
+# 沙箱；插件以普通用户启动系统 Chrome 时应使用浏览器自身的安全边界。
+_LAUNCH_ARGS = ["--disable-dev-shm-usage"]
 
 # 关闭超时保护（秒）：playwright 的 close/stop 在渲染进程卡死、页面
 # 悬挂等场景下可能永久悬挂；不加超时会导致插件 terminate 卡死，重载后
@@ -105,6 +105,9 @@ class BrowserCore:
         """
         cfg = config or {}
         self.browser_type: str = str(cfg.get("browser_type", "chromium"))
+        self.executable_path: str = str(
+            cfg.get("browser_executable_path", "") or ""
+        ).strip()
         self.proxy: str = str(cfg.get("proxy", "") or "")
         self.viewport: dict = cfg.get("viewport") or {"width": 1280, "height": 800}
         self.timeout: float = _safe_float(cfg.get("timeout", 30), 30)
@@ -177,6 +180,24 @@ class BrowserCore:
             # 启动前校验内核配置：非法值给出可选值提示，避免
             # getattr 返回 None 后 None.launch() 的无提示报错（v1.3.1）。
             self.browser_type = validate_browser_type(self.browser_type)
+            if self.executable_path:
+                if self.browser_type != "chromium":
+                    raise ValueError(
+                        "browser_executable_path 仅支持 chromium；"
+                        f"当前 browser_type={self.browser_type!r}"
+                    )
+                executable = Path(self.executable_path)
+                if not executable.is_absolute():
+                    raise ValueError(
+                        "browser_executable_path 必须是绝对路径："
+                        f"{self.executable_path!r}"
+                    )
+                if not executable.is_file() or not os.access(executable, os.X_OK):
+                    raise ValueError(
+                        "browser_executable_path 不存在或不可执行："
+                        f"{self.executable_path}"
+                    )
+                launch_kwargs["executable_path"] = str(executable)
             engine = getattr(self._playwright, self.browser_type)
             self._browser = await engine.launch(**launch_kwargs)
         except Exception:
@@ -189,8 +210,12 @@ class BrowserCore:
                     pass
                 self._playwright = None
             raise
-        logger.debug("ensure_browser 完成: type=%s proxy=%s",
-                     self.browser_type, self.proxy or "(直连)")
+        logger.debug(
+            "ensure_browser 完成: type=%s executable=%s proxy=%s",
+            self.browser_type,
+            self.executable_path or "(Playwright 默认)",
+            self.proxy or "(直连)",
+        )
 
     def _browser_alive(self) -> bool:
         """浏览器是否存活且已连接（崩溃/手动关闭后返回 False）。"""
